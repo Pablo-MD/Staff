@@ -38,7 +38,7 @@ class data_transformer():
             )
         return entries
     
-    @staticmethod
+
     def filter_by_onboarding_date(data: list(dict), onboarding_column: str, onboarding_date: str) -> pd.DataFrame:
         df = pd.DataFrame(data)
         #Filter candidates by Santander 
