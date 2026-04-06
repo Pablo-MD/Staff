@@ -1,0 +1,15 @@
+# As of now, to find Santander's Candidates we only use regular expresion using San, in the future if you want
+# to combien multiple areas we should consider iterating in a list of arrays in case one is defined
+areas:
+  Santander: "San"
+  BBVA : "BBVA"
+
+tables:
+  organizations : entidades
+  locations : localizaciones
+  employees : empleados
+  employee_details : empleados_info
+  projects : proyectos
+  incorporations : incorporaciones
+
+
