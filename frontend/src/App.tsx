@@ -1,25 +1,5 @@
 import * as React from 'react';
-import { useState, useEffect, useMemo, Component, ErrorInfo, ReactNode } from 'react';
-import { 
-  collection, 
-  onSnapshot, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
-  doc, 
-  serverTimestamp,
-  query,
-  orderBy,
-  getDocFromServer
-} from 'firebase/firestore';
-import { 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  onAuthStateChanged, 
-  signOut,
-  User
-} from 'firebase/auth';
-import { db, auth } from './firebase';
+import { useState, useEffect, Component, ErrorInfo, ReactNode } from 'react';
 import { 
   Users, 
   Briefcase, 
@@ -46,6 +26,10 @@ import { Label } from '@/components/ui/label';
 import { Toaster } from '@/components/ui/sonner';
 import { toast } from 'sonner';
 
+// API imports
+import { employeesApi, managersApi, projectsApi, healthApi } from '@/services/api';
+import type { Employee, Manager, Project } from '@/services/api';
+
 // --- Types ---
 enum OperationType {
   CREATE = 'create',
@@ -56,72 +40,9 @@ enum OperationType {
   WRITE = 'write',
 }
 
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | null | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-    tenantId: string | null | undefined;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
-  }
-}
-
-interface Employee {
-  id: string;
-  name: string;
-  status: 'free' | 'assigned' | 'on-hold';
-  managerId?: string;
-  projectId?: string;
-  updatedAt?: any;
-}
-
-interface Manager {
-  id: string;
-  name: string;
-  email?: string;
-}
-
-interface Project {
-  id: string;
-  name: string;
-  description?: string;
-}
-
-// --- Error Handling ---
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  toast.error(`Operation failed: ${errInfo.error}`);
-  throw new Error(JSON.stringify(errInfo));
-}
 
 // --- Main App Component ---
+
 // --- Error Boundary ---
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -189,186 +110,165 @@ export default function AppWithErrorBoundary() {
 }
 
 function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isApiReady, setIsApiReady] = useState(false);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [managers, setManagers] = useState<Manager[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeTab, setActiveTab] = useState<'employees' | 'managers' | 'projects'>('employees');
 
   // Form states
-  const [newEmployee, setNewEmployee] = useState({ name: '', status: 'free' as Employee['status'], managerId: '', projectId: '' });
+  const [newEmployee, setNewEmployee] = useState({ name: '', status: 'free' as Employee['status'], manager_id: '', project_id: '' });
   const [newManager, setNewManager] = useState({ name: '', email: '' });
   const [newProject, setNewProject] = useState({ name: '', description: '' });
 
-  // --- Auth ---
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setUser(user);
-      setIsAuthReady(true);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  const handleLogin = async () => {
-    try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-      toast.success('Logged in successfully');
-    } catch (error) {
-      console.error('Login error:', error);
-      toast.error('Failed to log in');
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-      toast.success('Logged out successfully');
-    } catch (error) {
-      console.error('Logout error:', error);
-      toast.error('Failed to log out');
-    }
-  };
-
-  // --- Connection Test ---
+  // --- API Connection Test ---
   useEffect(() => {
     async function testConnection() {
       try {
-        await getDocFromServer(doc(db, 'test', 'connection'));
+        await healthApi.check();
+        setIsApiReady(true);
       } catch (error) {
-        if (error instanceof Error && error.message.includes('the client is offline')) {
-          console.error("Please check your Firebase configuration.");
-          toast.error("Firebase connection failed. Check configuration.");
-        }
+        console.error("API connection failed:", error);
+        toast.error("Failed to connect to backend API. Please ensure the server is running on localhost:8000");
+        setIsApiReady(false);
       }
     }
     testConnection();
   }, []);
 
-  // --- Real-time Data Fetching ---
+  // --- Data Fetching ---
+  const fetchData = async () => {
+    if (!isApiReady) return;
+    
+    try {
+      const [employeesData, managersData, projectsData] = await Promise.all([
+        employeesApi.getAll(),
+        managersApi.getAll(),
+        projectsApi.getAll()
+      ]);
+      
+      setEmployees(employeesData);
+      setManagers(managersData);
+      setProjects(projectsData);
+    } catch (error) {
+      console.error('Failed to fetch data:', error);
+      toast.error('Failed to load data from server');
+    }
+  };
+
   useEffect(() => {
-    if (!isAuthReady || !user) return;
-
-    const unsubEmployees = onSnapshot(
-      query(collection(db, 'employees'), orderBy('name')),
-      (snapshot) => {
-        setEmployees(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Employee)));
-      },
-      (error) => handleFirestoreError(error, OperationType.GET, 'employees')
-    );
-
-    const unsubManagers = onSnapshot(
-      query(collection(db, 'managers'), orderBy('name')),
-      (snapshot) => {
-        setManagers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Manager)));
-      },
-      (error) => handleFirestoreError(error, OperationType.GET, 'managers')
-    );
-
-    const unsubProjects = onSnapshot(
-      query(collection(db, 'projects'), orderBy('name')),
-      (snapshot) => {
-        setProjects(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Project)));
-      },
-      (error) => handleFirestoreError(error, OperationType.GET, 'projects')
-    );
-
-    return () => {
-      unsubEmployees();
-      unsubManagers();
-      unsubProjects();
-    };
-  }, [isAuthReady, user]);
+    fetchData();
+  }, [isApiReady]);
 
   // --- Actions ---
   const addEmployee = async () => {
     if (!newEmployee.name) return;
     try {
-      await addDoc(collection(db, 'employees'), {
-        ...newEmployee,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
-      setNewEmployee({ name: '', status: 'free', managerId: '', projectId: '' });
+      await employeesApi.create(newEmployee);
+      setNewEmployee({ name: '', status: 'free', manager_id: '', project_id: '' });
       toast.success('Employee added');
+      fetchData();
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'employees');
+      console.error('Failed to add employee:', error);
+      toast.error('Failed to add employee');
     }
   };
 
   const updateEmployeeStatus = async (id: string, status: Employee['status']) => {
     try {
-      await updateDoc(doc(db, 'employees', id), {
+      const employee = employees.find(e => e.id === id);
+      if (!employee) return;
+      
+      await employeesApi.update(id, { 
+        ...employee, 
         status,
-        updatedAt: serverTimestamp()
+        manager_id: employee.manager_id,
+        project_id: employee.project_id
       });
       toast.success('Status updated');
+      fetchData();
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `employees/${id}`);
+      console.error('Failed to update status:', error);
+      toast.error('Failed to update status');
     }
   };
 
   const assignManager = async (employeeId: string, managerId: string) => {
     try {
-      await updateDoc(doc(db, 'employees', employeeId), {
-        managerId,
-        updatedAt: serverTimestamp()
+      const employee = employees.find(e => e.id === employeeId);
+      if (!employee) return;
+      
+      await employeesApi.update(employeeId, { 
+        ...employee, 
+        manager_id: managerId || undefined,
+        project_id: employee.project_id
       });
       toast.success('Manager assigned');
+      fetchData();
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `employees/${employeeId}`);
+      console.error('Failed to assign manager:', error);
+      toast.error('Failed to assign manager');
     }
   };
 
   const assignProject = async (employeeId: string, projectId: string) => {
     try {
-      await updateDoc(doc(db, 'employees', employeeId), {
-        projectId,
-        updatedAt: serverTimestamp()
+      const employee = employees.find(e => e.id === employeeId);
+      if (!employee) return;
+      
+      await employeesApi.update(employeeId, { 
+        ...employee, 
+        project_id: projectId || undefined,
+        manager_id: employee.manager_id
       });
       toast.success('Project assigned');
+      fetchData();
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `employees/${employeeId}`);
+      console.error('Failed to assign project:', error);
+      toast.error('Failed to assign project');
     }
   };
 
   const addManager = async () => {
     if (!newManager.name) return;
     try {
-      await addDoc(collection(db, 'managers'), {
-        ...newManager,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
+      await managersApi.create(newManager);
       setNewManager({ name: '', email: '' });
       toast.success('Manager added');
+      fetchData();
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'managers');
+      console.error('Failed to add manager:', error);
+      toast.error('Failed to add manager');
     }
   };
 
   const addProject = async () => {
     if (!newProject.name) return;
     try {
-      await addDoc(collection(db, 'projects'), {
-        ...newProject,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
+      await projectsApi.create(newProject);
       setNewProject({ name: '', description: '' });
       toast.success('Project added');
+      fetchData();
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'projects');
+      console.error('Failed to add project:', error);
+      toast.error('Failed to add project');
     }
   };
 
-  const deleteItem = async (collectionName: string, id: string) => {
+  const deleteItem = async (type: 'employees' | 'managers' | 'projects', id: string) => {
     try {
-      await deleteDoc(doc(db, collectionName, id));
+      if (type === 'employees') {
+        await employeesApi.delete(id);
+      } else if (type === 'managers') {
+        await managersApi.delete(id);
+      } else if (type === 'projects') {
+        await projectsApi.delete(id);
+      }
       toast.success('Item deleted');
+      fetchData();
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `${collectionName}/${id}`);
+      console.error('Failed to delete item:', error);
+      toast.error('Failed to delete item');
     }
   };
 
@@ -382,34 +282,13 @@ function App() {
     }
   };
 
-  if (!isAuthReady) {
+  if (!isApiReady) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-slate-50">
         <div className="animate-pulse flex flex-col items-center">
           <LayoutDashboard className="w-12 h-12 text-slate-300 mb-4" />
-          <p className="text-slate-500 font-medium">Initializing Dashboard...</p>
+          <p className="text-slate-500 font-medium">Connecting to API...</p>
         </div>
-      </div>
-    );
-  }
-
-  if (!user) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-slate-50">
-        <Card className="w-full max-w-md shadow-lg border-slate-200">
-          <CardHeader className="text-center">
-            <div className="mx-auto bg-slate-900 w-12 h-12 rounded-xl flex items-center justify-center mb-4">
-              <LayoutDashboard className="text-white w-6 h-6" />
-            </div>
-            <CardTitle className="text-2xl font-bold tracking-tight">Employee Status Manager</CardTitle>
-            <CardDescription>Sign in to manage your team assignments</CardDescription>
-          </CardHeader>
-          <CardContent className="flex justify-center pb-8">
-            <Button onClick={handleLogin} className="w-full max-w-xs bg-slate-900 hover:bg-slate-800">
-              <LogIn className="w-4 h-4 mr-2" /> Sign in with Google
-            </Button>
-          </CardContent>
-        </Card>
       </div>
     );
   }
@@ -429,11 +308,15 @@ function App() {
           </div>
           <div className="flex items-center gap-4">
             <div className="hidden sm:flex items-center gap-2 text-sm text-slate-500">
-              <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-full border border-slate-200" />
-              <span className="font-medium">{user.displayName}</span>
+              <span className="font-medium">FastAPI Backend</span>
             </div>
-            <Button variant="ghost" size="sm" onClick={handleLogout} className="text-slate-500 hover:text-slate-900">
-              <LogOut className="w-4 h-4 mr-2" /> Logout
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={fetchData}
+              className="text-slate-500 hover:text-slate-900"
+            >
+              Refresh
             </Button>
           </div>
         </div>
@@ -599,12 +482,12 @@ function App() {
                           </TableCell>
                           <TableCell>
                             <Select 
-                              value={employee.managerId || 'none'} 
+                              value={employee.manager_id || 'none'} 
                               onValueChange={(v) => assignManager(employee.id, v === 'none' ? '' : v)}
                             >
                               <SelectTrigger className="w-[150px] h-8 text-xs border-none bg-transparent hover:bg-slate-100 p-0 px-2">
                                 <SelectValue placeholder="Unassigned">
-                                  {managers.find(m => m.id === employee.managerId)?.name || 'Unassigned'}
+                                  {managers.find(m => m.id === employee.manager_id)?.name || 'Unassigned'}
                                 </SelectValue>
                               </SelectTrigger>
                               <SelectContent>
@@ -617,12 +500,12 @@ function App() {
                           </TableCell>
                           <TableCell>
                             <Select 
-                              value={employee.projectId || 'none'} 
+                              value={employee.project_id || 'none'} 
                               onValueChange={(v) => assignProject(employee.id, v === 'none' ? '' : v)}
                             >
                               <SelectTrigger className="w-[150px] h-8 text-xs border-none bg-transparent hover:bg-slate-100 p-0 px-2">
                                 <SelectValue placeholder="No Project">
-                                  {projects.find(p => p.id === employee.projectId)?.name || 'No Project'}
+                                  {projects.find(p => p.id === employee.project_id)?.name || 'No Project'}
                                 </SelectValue>
                               </SelectTrigger>
                               <SelectContent>
@@ -803,7 +686,7 @@ function App() {
       {/* Footer */}
       <footer className="mt-auto py-8 border-t border-slate-200 bg-white">
         <div className="max-w-7xl mx-auto px-4 text-center text-sm text-slate-400">
-          <p>© 2026 Employee Status Manager • Real-time Sync Enabled</p>
+          <p>© 2026 Employee Status Manager • FastAPI Backend</p>
         </div>
       </footer>
     </div>
